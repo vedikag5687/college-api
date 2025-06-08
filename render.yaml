@@ -1,0 +1,12 @@
+
+services:
+  - type: web
+    name: college-recommendation-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python api.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
