@@ -38,6 +38,17 @@ class UserPreferences(BaseModel):
 class CollegeResult(BaseModel):
     college_name: str
     close_rank: int
+    # Add other common columns that might be present
+    college_state: Optional[str] = None
+    degree: Optional[str] = None
+    branch: Optional[str] = None
+    gender: Optional[str] = None
+    category: Optional[str] = None
+    quota: Optional[str] = None
+    open_rank: Optional[int] = None
+    round: Optional[str] = None
+    # Add a flexible field for any additional columns
+    additional_data: Optional[Dict[str, Any]] = None
 
 class RecommendationResponse(BaseModel):
     success: bool
@@ -212,8 +223,26 @@ def load_sheets_data():
         print(f"Error loading sheets: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load sheets data: {str(e)}")
 
+def safe_convert_to_int(value):
+    """Safely convert value to int, return None if not possible"""
+    try:
+        if pd.isna(value):
+            return None
+        return int(float(value))
+    except (ValueError, TypeError):
+        return None
+
+def safe_convert_to_str(value):
+    """Safely convert value to string, return None if empty/nan"""
+    try:
+        if pd.isna(value) or str(value).strip() == '':
+            return None
+        return str(value).strip()
+    except:
+        return None
+
 def filter_colleges(df, gender, category, rank, degrees, branches, state=None, is_nit=False):
-    """Filter colleges based on criteria"""
+    """Filter colleges based on criteria and return all columns"""
     df = df.copy()
     
     df['close rank'] = pd.to_numeric(df['close rank'], errors='coerce')
@@ -231,7 +260,7 @@ def filter_colleges(df, gender, category, rank, degrees, branches, state=None, i
     df_filtered = df[filters].copy()
     
     if df_filtered.empty:
-        return df_filtered[['college name', 'close rank']]
+        return df_filtered
     
     if is_nit and state:
         def should_include_college(row):
@@ -247,13 +276,69 @@ def filter_colleges(df, gender, category, rank, degrees, branches, state=None, i
         df_filtered = df_filtered[df_filtered.apply(should_include_college, axis=1)].copy()
         
         if df_filtered.empty:
-            return df_filtered[['college name', 'close rank']]
+            return df_filtered
         
         df_filtered = df_filtered.sort_values(by='close rank', ascending=True)
     else:
         df_filtered = df_filtered.sort_values(by='close rank', ascending=True)
     
-    return df_filtered[['college name', 'close rank']].reset_index(drop=True)
+    return df_filtered.reset_index(drop=True)
+
+def convert_df_to_college_results(df):
+    """Convert DataFrame to list of CollegeResult objects with all columns"""
+    results = []
+    
+    if df.empty:
+        return results
+    
+    # Define standard column mappings
+    standard_columns = {
+        'college name': 'college_name',
+        'close rank': 'close_rank',
+        'college state': 'college_state',
+        'degree': 'degree',
+        'branch': 'branch',
+        'gender': 'gender',
+        'category': 'category',
+        'quota': 'quota',
+        'open rank': 'open_rank',
+        'round': 'round'
+    }
+    
+    for _, row in df.iterrows():
+        # Create the base college result with required fields
+        college_data = {
+            'college_name': safe_convert_to_str(row.get('college name', '')),
+            'close_rank': safe_convert_to_int(row.get('close rank', 0))
+        }
+        
+        # Add standard optional fields
+        for col_name, field_name in standard_columns.items():
+            if col_name in ['college name', 'close rank']:  # Skip already processed
+                continue
+            
+            value = row.get(col_name)
+            if col_name in ['open rank']:
+                college_data[field_name] = safe_convert_to_int(value)
+            else:
+                college_data[field_name] = safe_convert_to_str(value)
+        
+        # Add any additional columns not in standard mapping
+        additional_data = {}
+        for col in df.columns:
+            if col not in standard_columns:
+                value = safe_convert_to_str(row.get(col))
+                if value is not None:
+                    # Clean column name for JSON
+                    clean_col = col.replace(' ', '_').replace('-', '_').lower()
+                    additional_data[clean_col] = value
+        
+        if additional_data:
+            college_data['additional_data'] = additional_data
+        
+        results.append(CollegeResult(**college_data))
+    
+    return results
 
 def save_user_chat_json(user_data, nits_results, iiits_results):
     """Save complete user chat data to JSON file"""
@@ -327,7 +412,7 @@ async def get_recommendations(preferences: UserPreferences):
         if not sheets_data:
             raise HTTPException(status_code=503, detail="Sheets data not loaded")
         
-        # Filter NITs
+        # Filter NITs (returns full DataFrame)
         nits_df = filter_colleges(
             sheets_data.get("nits round 5", pd.DataFrame()),
             preferences.gender,
@@ -339,7 +424,7 @@ async def get_recommendations(preferences: UserPreferences):
             is_nit=True
         )
         
-        # Filter IIITs
+        # Filter IIITs (returns full DataFrame)
         iiits_df = filter_colleges(
             sheets_data.get("iiits round 5", pd.DataFrame()),
             preferences.gender,
@@ -351,24 +436,9 @@ async def get_recommendations(preferences: UserPreferences):
             is_nit=False
         )
         
-        # Convert to list of dictionaries
-        nits_results = []
-        if not nits_df.empty:
-            nits_results = [
-                CollegeResult(
-                    college_name=row['college name'],
-                    close_rank=int(row['close rank'])
-                ) for _, row in nits_df.iterrows()
-            ]
-        
-        iiits_results = []
-        if not iiits_df.empty:
-            iiits_results = [
-                CollegeResult(
-                    college_name=row['college name'],
-                    close_rank=int(row['close rank'])
-                ) for _, row in iiits_df.iterrows()
-            ]
+        # Convert DataFrames to CollegeResult objects with all columns
+        nits_results = convert_df_to_college_results(nits_df)
+        iiits_results = convert_df_to_college_results(iiits_df)
         
         # Save user data
         user_data = {
